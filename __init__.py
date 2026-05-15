@@ -576,6 +576,40 @@ def tool_audit(args: dict[str, Any], *, client: CarabinerHonchoClient | None = N
 _hook_lock = threading.Lock()
 
 
+def _capture_enabled() -> bool:
+    return (_env("CARABINER_CAPTURE_SUBAGENTS", "HONCHO_RELATIONSHIP_CAPTURE_SUBAGENTS") or "false").lower() in {"1", "true", "yes", "on"}
+
+
+def _snippet(value: Any, limit: int = 900) -> str:
+    text = str(value or "").strip()
+    return text if len(text) <= limit else text[:limit] + " ...[truncated]"
+
+
+def _delegated_tasks_from_args(args: Any) -> list[dict[str, Any]]:
+    if not isinstance(args, dict):
+        return []
+    if isinstance(args.get("tasks"), list):
+        tasks = []
+        for i, task in enumerate(args.get("tasks") or []):
+            if isinstance(task, dict):
+                tasks.append({
+                    "index": i,
+                    "goal": task.get("goal") or "",
+                    "role": task.get("role") or args.get("role") or "leaf",
+                    "toolsets": task.get("toolsets"),
+                })
+        return tasks
+    goal = args.get("goal")
+    if isinstance(goal, str) and goal.strip():
+        return [{
+            "index": 0,
+            "goal": goal,
+            "role": args.get("role") or "leaf",
+            "toolsets": args.get("toolsets"),
+        }]
+    return []
+
+
 def _configured_agent_id(cfg: CarabinerConfig) -> str:
     """Return the peer ID representing the current Hermes profile/agent."""
     value = cfg.agent_id or os.getenv("HERMES_PROFILE") or os.getenv("USER") or "agent:hermes"
@@ -584,10 +618,108 @@ def _configured_agent_id(cfg: CarabinerConfig) -> str:
     return normalize_peer_id(value)
 
 
-def _on_subagent_stop(**kwargs: Any) -> None:
-    """Best-effort low-confidence episode capture for delegated workers."""
+def _on_pre_tool_call(*, tool_name: str = "", args: Any = None, task_id: str = "", session_id: str = "", tool_call_id: str = "", **_: Any) -> None:
+    """Capture the task assigned at delegate_task start."""
+    if tool_name != "delegate_task":
+        return
     cfg = load_carabiner_config()
-    if not cfg.enabled or (_env("CARABINER_CAPTURE_SUBAGENTS", "HONCHO_RELATIONSHIP_CAPTURE_SUBAGENTS") or "false").lower() not in {"1", "true", "yes", "on"}:
+    if not cfg.enabled or not _capture_enabled():
+        return
+    tasks = _delegated_tasks_from_args(args)
+    if not tasks:
+        return
+    parent_id = _configured_agent_id(cfg)
+    with _hook_lock:
+        for task in tasks:
+            child_id = normalize_peer_id(f"agent:{task.get('role') or 'subagent'}")
+            try:
+                tool_record_episode({
+                    "actor": parent_id,
+                    "participants": [child_id],
+                    "relationship": "delegation_start",
+                    "repo": cfg.default_repo,
+                    "task_type": cfg.default_task_type,
+                    "claim": f"{parent_id} delegated task {task['index']} to {child_id}: {_snippet(task.get('goal'))}",
+                    "outcome": "started",
+                    "confidence": 0.3,
+                    "evidence": {
+                        "source": "pre_tool_call:delegate_task",
+                        "task_index": task["index"],
+                        "task_id": task_id,
+                        "session_id": session_id,
+                        "tool_call_id": tool_call_id,
+                        "role": task.get("role"),
+                        "toolsets": task.get("toolsets"),
+                    },
+                })
+            except Exception:
+                logger.debug("carabiner delegate_task start capture failed", exc_info=True)
+
+
+def _on_post_tool_call(*, tool_name: str = "", args: Any = None, result: Any = None, task_id: str = "", session_id: str = "", tool_call_id: str = "", duration_ms: int | None = None, **_: Any) -> None:
+    """Capture delegate_task outcomes with their original assigned goals."""
+    if tool_name != "delegate_task":
+        return
+    cfg = load_carabiner_config()
+    if not cfg.enabled or not _capture_enabled():
+        return
+    tasks = {t["index"]: t for t in _delegated_tasks_from_args(args)}
+    if not tasks:
+        return
+    try:
+        parsed = json.loads(result) if isinstance(result, str) else (result or {})
+    except Exception:
+        parsed = {}
+    results = parsed.get("results") if isinstance(parsed, dict) else None
+    if not isinstance(results, list):
+        return
+    parent_id = _configured_agent_id(cfg)
+    with _hook_lock:
+        for entry in results:
+            if not isinstance(entry, dict):
+                continue
+            idx = entry.get("task_index")
+            task = tasks.get(idx if isinstance(idx, int) else 0)
+            if not task:
+                continue
+            child_id = normalize_peer_id(f"agent:{task.get('role') or 'subagent'}")
+            status = entry.get("status") or "unknown"
+            summary = entry.get("summary") or entry.get("error") or ""
+            try:
+                tool_record_episode({
+                    "actor": parent_id,
+                    "participants": [child_id],
+                    "relationship": "delegation_outcome",
+                    "repo": cfg.default_repo,
+                    "task_type": cfg.default_task_type,
+                    "claim": f"{parent_id} delegated task {task['index']} to {child_id}. Goal: {_snippet(task.get('goal'), 500)} Outcome {status}: {_snippet(summary, 900)}",
+                    "outcome": status,
+                    "confidence": 0.4,
+                    "evidence": {
+                        "source": "post_tool_call:delegate_task",
+                        "task_index": task["index"],
+                        "task_id": task_id,
+                        "session_id": session_id,
+                        "tool_call_id": tool_call_id,
+                        "role": task.get("role"),
+                        "duration_ms": duration_ms,
+                        "child_duration_seconds": entry.get("duration_seconds"),
+                        "api_calls": entry.get("api_calls"),
+                    },
+                })
+            except Exception:
+                logger.debug("carabiner delegate_task outcome capture failed", exc_info=True)
+
+
+def _on_subagent_stop(**kwargs: Any) -> None:
+    """Best-effort legacy low-confidence episode capture for delegated workers."""
+    # Current Hermes exposes richer delegate_task start/end data through
+    # pre_tool_call/post_tool_call. Keep subagent_stop as an explicit legacy
+    # fallback only, otherwise it duplicates post_tool_call outcome records.
+    if (_env("CARABINER_CAPTURE_SUBAGENT_STOP", "HONCHO_RELATIONSHIP_CAPTURE_SUBAGENT_STOP") or "false").lower() not in {"1", "true", "yes", "on"}:
+        return
+    cfg = load_carabiner_config()
+    if not cfg.enabled or not _capture_enabled():
         return
     summary = (kwargs.get("child_summary") or "").strip()
     child_role = kwargs.get("child_role") or "subagent"
@@ -767,4 +899,6 @@ def register(ctx) -> None:
         description="Audit relationship-memory records in Honcho",
         emoji="🧠",
     )
+    ctx.register_hook("pre_tool_call", _on_pre_tool_call)
+    ctx.register_hook("post_tool_call", _on_post_tool_call)
     ctx.register_hook("subagent_stop", _on_subagent_stop)

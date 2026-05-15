@@ -162,7 +162,7 @@ def test_register_uses_carabiner_tool_names_and_toolset():
         "carabiner_audit",
     ]
     assert {tool["toolset"] for tool in ctx.tools} == {"carabiner"}
-    assert ctx.hooks and ctx.hooks[0][0] == "subagent_stop"
+    assert [hook[0] for hook in ctx.hooks] == ["pre_tool_call", "post_tool_call", "subagent_stop"]
 
 
 def test_manifest_tools_match_registered_tools():
@@ -232,12 +232,51 @@ def test_load_config_merges_partial_carabiner_block_with_legacy_block(monkeypatc
     assert cfg.enabled is False
 
 
-def test_subagent_stop_hook_records_parent_agent_when_capture_enabled(monkeypatch):
+def test_delegate_task_hooks_record_start_and_outcome_when_capture_enabled(monkeypatch):
     captured = []
     monkeypatch.setenv("CARABINER_CAPTURE_SUBAGENTS", "true")
     monkeypatch.setenv("CARABINER_AGENT_ID", "agent:ika-frontend")
     monkeypatch.setenv("CARABINER_DEFAULT_REPO", "relay-ide")
     monkeypatch.setenv("CARABINER_DEFAULT_TASK_TYPE", "frontend")
+    monkeypatch.setattr(carabiner, "tool_record_episode", lambda args: captured.append(args) or '{"success": true}')
+
+    args = {"goal": "implement sidebar tabs", "role": "leaf", "toolsets": ["terminal", "file"]}
+    carabiner._on_pre_tool_call(
+        tool_name="delegate_task",
+        args=args,
+        task_id="task-1",
+        session_id="session-1",
+        tool_call_id="call-1",
+    )
+    carabiner._on_post_tool_call(
+        tool_name="delegate_task",
+        args=args,
+        result='{"results":[{"task_index":0,"status":"completed","summary":"implemented sidebar tabs","duration_seconds":12,"api_calls":3}]}',
+        task_id="task-1",
+        session_id="session-1",
+        tool_call_id="call-1",
+        duration_ms=12345,
+    )
+
+    assert len(captured) == 2
+    assert captured[0]["relationship"] == "delegation_start"
+    assert captured[0]["actor"] == "agent-ika-frontend"
+    assert captured[0]["participants"] == ["agent-leaf"]
+    assert captured[0]["evidence"]["source"] == "pre_tool_call:delegate_task"
+    assert "implement sidebar tabs" in captured[0]["claim"]
+    assert captured[1]["relationship"] == "delegation_outcome"
+    assert captured[1]["outcome"] == "completed"
+    assert captured[1]["repo"] == "relay-ide"
+    assert captured[1]["task_type"] == "frontend"
+    assert "implemented sidebar tabs" in captured[1]["claim"]
+    assert captured[1]["evidence"]["source"] == "post_tool_call:delegate_task"
+
+
+def test_subagent_stop_hook_is_legacy_opt_in(monkeypatch):
+    captured = []
+    monkeypatch.setenv("CARABINER_CAPTURE_SUBAGENTS", "true")
+    monkeypatch.setenv("CARABINER_CAPTURE_SUBAGENT_STOP", "true")
+    monkeypatch.setenv("CARABINER_AGENT_ID", "agent:ika-frontend")
     monkeypatch.setattr(carabiner, "tool_record_episode", lambda args: captured.append(args) or '{"success": true}')
 
     carabiner._on_subagent_stop(
@@ -251,7 +290,4 @@ def test_subagent_stop_hook_records_parent_agent_when_capture_enabled(monkeypatc
     assert len(captured) == 1
     assert captured[0]["actor"] == "agent-ika-frontend"
     assert captured[0]["participants"] == ["agent-leaf"]
-    assert captured[0]["repo"] == "relay-ide"
-    assert captured[0]["task_type"] == "frontend"
-    assert "implemented sidebar tabs" in captured[0]["claim"]
     assert captured[0]["evidence"]["source"] == "subagent_stop_hook"

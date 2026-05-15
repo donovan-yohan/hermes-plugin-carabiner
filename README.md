@@ -108,20 +108,36 @@ For migration from the early prototype, `HONCHO_RELATIONSHIP_*` env vars and the
 
 ### 1. Automatic `delegate_task` capture
 
-When `CARABINER_CAPTURE_SUBAGENTS=true`, Carabiner listens for Hermes' `subagent_stop` hook. Every completed `delegate_task` child creates a low-confidence collaboration episode:
+When `CARABINER_CAPTURE_SUBAGENTS=true`, Carabiner listens for Hermes' generic tool hooks around `delegate_task`:
+
+- `pre_tool_call` captures the assigned task at the moment delegation starts: goal preview, child role, toolsets, parent session, and tool call id.
+- `post_tool_call` captures the outcome when delegation finishes: original assigned goal, child status, summary/error, duration, and API call count.
+
+That gives Carabiner both sides of the assignment:
 
 ```text
-actor: agent:ika-frontend
-participant: agent:leaf / agent:orchestrator
-relationship: delegation_outcome
-claim: ika delegated work; child finished with status completed: <summary>
-evidence: parent_session_id, child_role, duration_ms, source=subagent_stop_hook
-confidence: 0.35
+start:
+  actor: agent:ika-frontend
+  participant: agent:leaf / agent:orchestrator
+  relationship: delegation_start
+  claim: ika delegated task 0 to leaf: <goal preview>
+  evidence: session_id, tool_call_id, task_index, role, toolsets
+  confidence: 0.30
+
+end:
+  actor: agent:ika-frontend
+  participant: agent:leaf / agent:orchestrator
+  relationship: delegation_outcome
+  claim: ika delegated task 0 to leaf. Goal: <goal preview>. Outcome completed: <summary>
+  evidence: session_id, tool_call_id, task_index, duration, api_calls
+  confidence: 0.40
 ```
 
 This is good for organic background learning, but do not over-trust it. A delegate summary is weaker evidence than explicit QA/review feedback.
 
-Important current limitation: Hermes' `subagent_stop` hook exposes child role/status/summary, not a full named ocean profile identity or task goal. If you need “Kame gave feedback to Ika” or “Fugu reviewed Kani,” use explicit feedback records or add richer Kanban/profile lifecycle hooks.
+Important current limitation: the generic `delegate_task` call knows the assigned goal and child role (`leaf` / `orchestrator`), but not always a full named ocean profile identity. If you need “Kame gave feedback to Ika” or “Fugu reviewed Kani,” use explicit feedback records or add richer Kanban/profile lifecycle hooks.
+
+A legacy `subagent_stop` hook remains available behind `CARABINER_CAPTURE_SUBAGENT_STOP=true`, but it is off by default because `post_tool_call` has richer goal/outcome context and avoids duplicate records.
 
 ### 2. Explicit feedback records
 
