@@ -230,3 +230,28 @@ def test_load_config_merges_partial_carabiner_block_with_legacy_block(monkeypatc
     assert cfg.workspace == "new-workspace"
     assert cfg.timeout == 7
     assert cfg.enabled is False
+
+
+def test_subagent_stop_hook_records_parent_agent_when_capture_enabled(monkeypatch):
+    captured = []
+    monkeypatch.setenv("CARABINER_CAPTURE_SUBAGENTS", "true")
+    monkeypatch.setenv("CARABINER_AGENT_ID", "agent:ika-frontend")
+    monkeypatch.setenv("CARABINER_DEFAULT_REPO", "relay-ide")
+    monkeypatch.setenv("CARABINER_DEFAULT_TASK_TYPE", "frontend")
+    monkeypatch.setattr(carabiner, "tool_record_episode", lambda args: captured.append(args) or '{"success": true}')
+
+    carabiner._on_subagent_stop(
+        parent_session_id="parent-1",
+        child_role="leaf",
+        child_summary="implemented sidebar tabs",
+        child_status="completed",
+        duration_ms=1234,
+    )
+
+    assert len(captured) == 1
+    assert captured[0]["actor"] == "agent-ika-frontend"
+    assert captured[0]["participants"] == ["agent-leaf"]
+    assert captured[0]["repo"] == "relay-ide"
+    assert captured[0]["task_type"] == "frontend"
+    assert "implemented sidebar tabs" in captured[0]["claim"]
+    assert captured[0]["evidence"]["source"] == "subagent_stop_hook"

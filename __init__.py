@@ -206,6 +206,9 @@ class CarabinerConfig:
     workspace: str = DEFAULT_WORKSPACE
     timeout: float = 15.0
     enabled: bool = True
+    agent_id: str = ""
+    default_repo: str = ""
+    default_task_type: str = "delegation"
 
 
 def _env(primary: str, legacy: str | None = None) -> str | None:
@@ -238,6 +241,9 @@ def load_carabiner_config() -> CarabinerConfig:
         workspace=_env("CARABINER_WORKSPACE", "HONCHO_RELATIONSHIP_WORKSPACE") or str(cfg.get("workspace") or DEFAULT_WORKSPACE),
         timeout=float(_env("CARABINER_TIMEOUT", "HONCHO_RELATIONSHIP_TIMEOUT") or cfg.get("timeout") or 15.0),
         enabled=str(_env("CARABINER_ENABLED", "HONCHO_RELATIONSHIP_ENABLED") or cfg.get("enabled", "true")).lower() not in {"0", "false", "no", "off"},
+        agent_id=_env("CARABINER_AGENT_ID") or str(cfg.get("agent_id") or os.getenv("HERMES_PROFILE") or ""),
+        default_repo=_env("CARABINER_DEFAULT_REPO") or str(cfg.get("default_repo") or ""),
+        default_task_type=_env("CARABINER_DEFAULT_TASK_TYPE") or str(cfg.get("default_task_type") or "delegation"),
     )
 
 
@@ -570,26 +576,40 @@ def tool_audit(args: dict[str, Any], *, client: CarabinerHonchoClient | None = N
 _hook_lock = threading.Lock()
 
 
+def _configured_agent_id(cfg: CarabinerConfig) -> str:
+    """Return the peer ID representing the current Hermes profile/agent."""
+    value = cfg.agent_id or os.getenv("HERMES_PROFILE") or os.getenv("USER") or "agent:hermes"
+    if ":" not in value:
+        value = f"agent:{value}"
+    return normalize_peer_id(value)
+
+
 def _on_subagent_stop(**kwargs: Any) -> None:
     """Best-effort low-confidence episode capture for delegated workers."""
     cfg = load_carabiner_config()
     if not cfg.enabled or (_env("CARABINER_CAPTURE_SUBAGENTS", "HONCHO_RELATIONSHIP_CAPTURE_SUBAGENTS") or "false").lower() not in {"1", "true", "yes", "on"}:
         return
     summary = (kwargs.get("child_summary") or "").strip()
-    role = kwargs.get("child_role") or "agent-subagent"
+    child_role = kwargs.get("child_role") or "subagent"
     status = kwargs.get("child_status") or "unknown"
     if not summary:
         return
+    parent_id = _configured_agent_id(cfg)
+    child_id = normalize_peer_id(f"agent:{child_role}")
     with _hook_lock:
         try:
             tool_record_episode({
-                "actor": f"agent:{role}",
+                "actor": parent_id,
+                "participants": [child_id],
                 "relationship": "delegation_outcome",
-                "claim": f"Delegated child finished with status {status}: {summary[:1200]}",
+                "repo": cfg.default_repo,
+                "task_type": cfg.default_task_type,
+                "claim": f"{parent_id} delegated work to {child_id}; child finished with status {status}: {summary[:1200]}",
                 "outcome": status,
                 "confidence": 0.35,
                 "evidence": {
                     "parent_session_id": kwargs.get("parent_session_id"),
+                    "child_role": child_role,
                     "duration_ms": kwargs.get("duration_ms"),
                     "source": "subagent_stop_hook",
                 },
