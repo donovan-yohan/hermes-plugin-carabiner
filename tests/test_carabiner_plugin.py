@@ -1,0 +1,232 @@
+import importlib.util
+import json
+import sys
+import types
+from pathlib import Path
+
+PLUGIN_PATH = Path(__file__).resolve().parents[1] / "__init__.py"
+spec = importlib.util.spec_from_file_location("carabiner_plugin", PLUGIN_PATH)
+assert spec is not None
+carabiner = importlib.util.module_from_spec(spec)
+assert spec.loader is not None
+sys.modules[spec.name] = carabiner
+spec.loader.exec_module(carabiner)
+
+CarabinerHonchoClient = carabiner.CarabinerHonchoClient
+build_feedback_message = carabiner.build_feedback_message
+build_handoff_query = carabiner.build_handoff_query
+normalize_peer_id = carabiner.normalize_peer_id
+tool_handoff_context = carabiner.tool_handoff_context
+tool_record_feedback = carabiner.tool_record_feedback
+
+
+class FakeTransport:
+    def __init__(self):
+        self.calls = []
+
+    def __call__(self, method, path, body=None, query=None):
+        self.calls.append((method, path, body, query))
+        if path.endswith("/messages"):
+            return [{"id": "msg_1"}]
+        if path.endswith("/representation"):
+            return {"representation": "kame expects screenshot evidence"}
+        if path.endswith("/search"):
+            return [{"content": "fallback evidence: include console output", "peer_id": "agent-kame-qa", "session_id": "work-1", "metadata": {"kind": "peer_feedback"}}]
+        return {"id": body.get("id") if isinstance(body, dict) else "ok"}
+
+
+class EmptyRepresentationTransport(FakeTransport):
+    def __call__(self, method, path, body=None, query=None):
+        self.calls.append((method, path, body, query))
+        if path.endswith("/representation"):
+            return {"representation": ""}
+        if path.endswith("/search"):
+            return [{"content": "raw fallback says screenshots are required", "peer_id": "agent-kame-qa", "session_id": "work-1", "metadata": {"kind": "peer_feedback"}}]
+        return {"id": body.get("id") if isinstance(body, dict) else "ok"}
+
+
+def test_normalize_peer_id_makes_honcho_safe_stable_ids():
+    assert normalize_peer_id("agent:ika-frontend") == "agent-ika-frontend"
+    assert normalize_peer_id("Kame QA") == "kame-qa"
+    assert normalize_peer_id("agent:kame_qa") == "agent-kame-qa"
+
+
+def test_build_feedback_message_keeps_critique_operational_not_identity_label():
+    message = build_feedback_message(
+        observer="agent:kame-qa",
+        subject="agent:ika-frontend",
+        relationship="qa_handoff",
+        repo="hermes-agent",
+        raw_feedback="This handoff is unverifiable without screenshots.",
+        operational_critique="For frontend QA handoffs, include screenshot and console evidence.",
+        confidence=0.82,
+        evidence={"work_id": "work:hermes-agent:123"},
+    )
+
+    assert message["peer_id"] == "agent-kame-qa"
+    assert message["metadata"]["kind"] == "peer_feedback"
+    assert message["metadata"]["subject"] == "agent-ika-frontend"
+    assert "unverifiable" in message["content"]
+    assert "include screenshot" in message["content"]
+    assert "ika is sloppy" not in message["content"].lower()
+
+
+def test_record_feedback_tool_writes_workspace_session_peers_and_message():
+    transport = FakeTransport()
+    client = CarabinerHonchoClient(
+        base_url="https://memory.example.test",
+        api_key="secret",
+        workspace="hermes-ocean-dev",
+        transport=transport,
+    )
+
+    result = json.loads(tool_record_feedback({
+        "observer": "agent:kame-qa",
+        "subject": "agent:ika-frontend",
+        "relationship": "qa_handoff",
+        "repo": "hermes-agent",
+        "task_type": "frontend",
+        "raw_feedback": "No screenshot proof.",
+        "operational_critique": "Include screenshots before QA handoff.",
+        "evidence": {"work_id": "work:hermes-agent:123"},
+    }, client=client))
+
+    assert result["success"] is True
+    assert result["workspace"] == "hermes-ocean-dev"
+    assert result["session_id"] == "work-hermes-agent-123"
+    paths = [call[1] for call in transport.calls]
+    assert "/v3/workspaces" in paths
+    assert "/v3/workspaces/hermes-ocean-dev/peers" in paths
+    assert "/v3/workspaces/hermes-ocean-dev/sessions/work-hermes-agent-123/messages" in paths
+
+
+def test_build_handoff_query_is_scoped_to_repo_task_and_artifact():
+    query = build_handoff_query(
+        from_agent="agent:ika-frontend",
+        to_agent="agent:kame-qa",
+        repo="hermes-agent",
+        task_type="frontend",
+        artifact_type="ui_change",
+    )
+
+    assert "ika-frontend" in query
+    assert "kame-qa" in query
+    assert "hermes-agent" in query
+    assert "frontend" in query
+    assert "ui_change" in query
+
+
+def test_handoff_context_falls_back_to_raw_search_when_representation_empty():
+    transport = EmptyRepresentationTransport()
+    client = CarabinerHonchoClient(
+        base_url="https://memory.example.test",
+        api_key="secret",
+        workspace="hermes-ocean-dev",
+        transport=transport,
+    )
+
+    result = json.loads(tool_handoff_context({
+        "from_agent": "agent:ika-frontend",
+        "to_agent": "agent:kame-qa",
+        "repo": "hermes-agent",
+        "task_type": "frontend",
+        "artifact_type": "ui_change",
+    }, client=client))
+
+    assert result["success"] is True
+    assert result["source"] == "raw_search_fallback"
+    assert "screenshots are required" in result["context"]
+    assert any(call[1].endswith("/search") for call in transport.calls)
+
+
+def test_register_uses_carabiner_tool_names_and_toolset():
+    class FakeContext:
+        def __init__(self):
+            self.tools = []
+            self.hooks = []
+
+        def register_tool(self, **kwargs):
+            self.tools.append(kwargs)
+
+        def register_hook(self, name, handler):
+            self.hooks.append((name, handler))
+
+    ctx = FakeContext()
+    carabiner.register(ctx)
+
+    assert [tool["name"] for tool in ctx.tools] == [
+        "carabiner_record_feedback",
+        "carabiner_record_episode",
+        "carabiner_handoff_context",
+        "carabiner_context",
+        "carabiner_audit",
+    ]
+    assert {tool["toolset"] for tool in ctx.tools} == {"carabiner"}
+    assert ctx.hooks and ctx.hooks[0][0] == "subagent_stop"
+
+
+def test_manifest_tools_match_registered_tools():
+    class FakeContext:
+        def __init__(self):
+            self.tools = []
+
+        def register_tool(self, **kwargs):
+            self.tools.append(kwargs["name"])
+
+        def register_hook(self, name, handler):
+            pass
+
+    ctx = FakeContext()
+    carabiner.register(ctx)
+    manifest = (PLUGIN_PATH.parent / "plugin.yaml").read_text()
+    manifest_tools = [line.strip()[2:] for line in manifest.splitlines() if line.startswith("  - carabiner_")]
+
+    assert manifest_tools == ctx.tools
+
+
+def test_load_config_prefers_carabiner_env_with_legacy_fallback(monkeypatch):
+    monkeypatch.delenv("CARABINER_API_KEY", raising=False)
+    monkeypatch.setenv("HONCHO_RELATIONSHIP_API_KEY", "legacy-key")
+    cfg = carabiner.load_carabiner_config()
+    assert cfg.api_key == "legacy-key"
+
+    monkeypatch.setenv("CARABINER_API_KEY", "new-key")
+    cfg = carabiner.load_carabiner_config()
+    assert cfg.api_key == "new-key"
+
+
+def test_load_config_merges_partial_carabiner_block_with_legacy_block(monkeypatch):
+    for key in [
+        "CARABINER_API_KEY",
+        "HONCHO_RELATIONSHIP_API_KEY",
+        "CARABINER_BASE_URL",
+        "HONCHO_RELATIONSHIP_BASE_URL",
+        "CARABINER_WORKSPACE",
+        "HONCHO_RELATIONSHIP_WORKSPACE",
+    ]:
+        monkeypatch.delenv(key, raising=False)
+
+    fake_config = types.ModuleType("hermes_cli.config")
+    setattr(fake_config, "load_config", lambda: {
+        "agent_relationship_memory": {
+            "base_url": "https://legacy.example.test",
+            "api_key": "legacy-config-key",
+            "workspace": "legacy-workspace",
+            "timeout": 7,
+        },
+        "carabiner": {
+            "enabled": False,
+            "workspace": "new-workspace",
+        },
+    })
+    fake_pkg = types.ModuleType("hermes_cli")
+    monkeypatch.setitem(sys.modules, "hermes_cli", fake_pkg)
+    monkeypatch.setitem(sys.modules, "hermes_cli.config", fake_config)
+
+    cfg = carabiner.load_carabiner_config()
+
+    assert cfg.base_url == "https://legacy.example.test"
+    assert cfg.api_key == "legacy-config-key"
+    assert cfg.workspace == "new-workspace"
+    assert cfg.timeout == 7
+    assert cfg.enabled is False

@@ -1,0 +1,14 @@
+name: carabiner
+version: "0.1.0"
+description: Honcho-backed Hermes sidecar for connecting specialist agents through collaboration memory.
+kind: standalone
+requires_env:
+  - CARABINER_API_KEY
+provides_tools:
+  - carabiner_record_feedback
+  - carabiner_record_episode
+  - carabiner_handoff_context
+  - carabiner_context
+  - carabiner_audit
+provides_hooks:
+  - subagent_stop
