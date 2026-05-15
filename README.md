@@ -75,7 +75,7 @@ Health:     https://memory.fish-rattlesnake.ts.net/health
 Hindsight:  http://memory.fish-rattlesnake.ts.net:8888
 ```
 
-`/health` is open. `/v3/*` requires an HS256 Bearer JWT. Empty representations after successful writes usually mean the Honcho deriver queue has not processed work yet; Carabiner falls back to raw scoped search and labels that as `raw_search_fallback`.
+`/health` is open. `/v3/*` requires an HS256 Bearer JWT. Empty representations after successful small smoke writes are not automatically a broken deriver: Honcho may need roughly 1024 tokens of accumulated session/message content before representation processing kicks in. Carabiner falls back to raw scoped search and labels that as `raw_search_fallback` while representations are empty.
 
 ## Development
 
