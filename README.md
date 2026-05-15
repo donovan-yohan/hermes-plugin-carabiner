@@ -78,8 +78,8 @@ CARABINER_AGENT_ID=agent:ika-frontend
 CARABINER_DEFAULT_REPO=relay-ide
 CARABINER_DEFAULT_TASK_TYPE=frontend
 
-# automatic delegate_task capture is opt-in
-CARABINER_CAPTURE_SUBAGENTS=true
+# optional diagnostic mode for anonymous delegate_task children; normally leave off
+CARABINER_CAPTURE_DELEGATE_TASKS=false
 
 # optional
 CARABINER_TIMEOUT=15
@@ -106,38 +106,44 @@ For migration from the early prototype, `HONCHO_RELATIONSHIP_*` env vars and the
 
 ## How agents use this
 
-### 1. Automatic `delegate_task` capture
+### 1. Preferred automatic capture: Kanban lifecycle hooks
 
-When `CARABINER_CAPTURE_SUBAGENTS=true`, Carabiner listens for Hermes' generic tool hooks around `delegate_task`:
+For named ocean teammates, Carabiner should observe Kanban lifecycle events rather than generic `delegate_task` calls. Kanban has the actual profile identity and task state: assignee, status, comments, dependencies, blockers, completions, and handoffs.
 
-- `pre_tool_call` captures the assigned task at the moment delegation starts: goal preview, child role, toolsets, parent session, and tool call id.
-- `post_tool_call` captures the outcome when delegation finishes: original assigned goal, child status, summary/error, duration, and API call count.
-
-That gives Carabiner both sides of the assignment:
+Target v1 event sources:
 
 ```text
-start:
-  actor: agent:ika-frontend
-  participant: agent:leaf / agent:orchestrator
-  relationship: delegation_start
-  claim: ika delegated task 0 to leaf: <goal preview>
-  evidence: session_id, tool_call_id, task_index, role, toolsets
-  confidence: 0.30
-
-end:
-  actor: agent:ika-frontend
-  participant: agent:leaf / agent:orchestrator
-  relationship: delegation_outcome
-  claim: ika delegated task 0 to leaf. Goal: <goal preview>. Outcome completed: <summary>
-  evidence: session_id, tool_call_id, task_index, duration, api_calls
-  confidence: 0.40
+kanban_task_created / kanban_task_assigned
+kanban_task_claimed / kanban_task_started
+kanban_task_commented
+kanban_task_blocked / kanban_task_unblocked
+kanban_task_completed / kanban_task_archived
+kanban_task_linked / kanban_task_unlinked
 ```
 
-This is good for organic background learning, but do not over-trust it. A delegate summary is weaker evidence than explicit QA/review feedback.
+Those events should produce high-quality named relationship memories such as:
 
-Important current limitation: the generic `delegate_task` call knows the assigned goal and child role (`leaf` / `orchestrator`), but not always a full named ocean profile identity. If you need “Kame gave feedback to Ika” or “Fugu reviewed Kani,” use explicit feedback records or add richer Kanban/profile lifecycle hooks.
+```text
+kame-qa blocked ika-frontend's frontend handoff because screenshot evidence was missing.
+fugu-reviewer approved kani-backend's CLI hook patch after targeted tests passed.
+kurage-writer consulted kani-backend before documenting backend behavior.
+```
 
-A legacy `subagent_stop` hook remains available behind `CARABINER_CAPTURE_SUBAGENT_STOP=true`, but it is off by default because `post_tool_call` has richer goal/outcome context and avoids duplicate records.
+Until Hermes core exposes dedicated Kanban lifecycle hooks, use explicit `carabiner_record_feedback` for important named-agent critique and handoff learning.
+
+### 1b. Experimental legacy capture: generic `delegate_task`
+
+Carabiner still contains an explicit diagnostic mode for anonymous `delegate_task` capture, but it is **not** the recommended ocean-team path.
+
+Enable only if you really want low-confidence records about generic leaf/orchestrator subagents:
+
+```bash
+CARABINER_CAPTURE_DELEGATE_TASKS=true
+# optional duplicate/legacy subagent_stop capture, normally leave off
+CARABINER_CAPTURE_SUBAGENT_STOP=false
+```
+
+Why this is off by default: `delegate_task` knows the assigned goal and child role (`leaf` / `orchestrator`), but not a full named teammate profile like `kame-qa` or `kani-backend`. Treat these records as anonymous subagent diagnostics, not real teammate relationship memory.
 
 ### 2. Explicit feedback records
 

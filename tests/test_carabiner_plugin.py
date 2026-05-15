@@ -234,7 +234,7 @@ def test_load_config_merges_partial_carabiner_block_with_legacy_block(monkeypatc
 
 def test_delegate_task_hooks_record_start_and_outcome_when_capture_enabled(monkeypatch):
     captured = []
-    monkeypatch.setenv("CARABINER_CAPTURE_SUBAGENTS", "true")
+    monkeypatch.setenv("CARABINER_CAPTURE_DELEGATE_TASKS", "true")
     monkeypatch.setenv("CARABINER_AGENT_ID", "agent:ika-frontend")
     monkeypatch.setenv("CARABINER_DEFAULT_REPO", "relay-ide")
     monkeypatch.setenv("CARABINER_DEFAULT_TASK_TYPE", "frontend")
@@ -274,7 +274,7 @@ def test_delegate_task_hooks_record_start_and_outcome_when_capture_enabled(monke
 
 def test_subagent_stop_hook_is_legacy_opt_in(monkeypatch):
     captured = []
-    monkeypatch.setenv("CARABINER_CAPTURE_SUBAGENTS", "true")
+    monkeypatch.setenv("CARABINER_CAPTURE_DELEGATE_TASKS", "true")
     monkeypatch.setenv("CARABINER_CAPTURE_SUBAGENT_STOP", "true")
     monkeypatch.setenv("CARABINER_AGENT_ID", "agent:ika-frontend")
     monkeypatch.setattr(carabiner, "tool_record_episode", lambda args: captured.append(args) or '{"success": true}')

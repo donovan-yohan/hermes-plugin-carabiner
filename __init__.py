@@ -576,8 +576,15 @@ def tool_audit(args: dict[str, Any], *, client: CarabinerHonchoClient | None = N
 _hook_lock = threading.Lock()
 
 
-def _capture_enabled() -> bool:
-    return (_env("CARABINER_CAPTURE_SUBAGENTS", "HONCHO_RELATIONSHIP_CAPTURE_SUBAGENTS") or "false").lower() in {"1", "true", "yes", "on"}
+def _truthy_env(primary: str, legacy: str | None = None, default: str = "false") -> bool:
+    return (_env(primary, legacy) or default).lower() in {"1", "true", "yes", "on"}
+
+
+def _delegate_capture_enabled() -> bool:
+    # Generic delegate_task children are anonymous leaf/orchestrator workers, not
+    # named ocean teammates. Keep this as an explicit diagnostic mode; prefer
+    # Kanban lifecycle hooks for real named-profile relationship memory.
+    return _truthy_env("CARABINER_CAPTURE_DELEGATE_TASKS", default="false")
 
 
 def _snippet(value: Any, limit: int = 900) -> str:
@@ -623,7 +630,7 @@ def _on_pre_tool_call(*, tool_name: str = "", args: Any = None, task_id: str = "
     if tool_name != "delegate_task":
         return
     cfg = load_carabiner_config()
-    if not cfg.enabled or not _capture_enabled():
+    if not cfg.enabled or not _delegate_capture_enabled():
         return
     tasks = _delegated_tasks_from_args(args)
     if not tasks:
@@ -661,7 +668,7 @@ def _on_post_tool_call(*, tool_name: str = "", args: Any = None, result: Any = N
     if tool_name != "delegate_task":
         return
     cfg = load_carabiner_config()
-    if not cfg.enabled or not _capture_enabled():
+    if not cfg.enabled or not _delegate_capture_enabled():
         return
     tasks = {t["index"]: t for t in _delegated_tasks_from_args(args)}
     if not tasks:
@@ -719,7 +726,7 @@ def _on_subagent_stop(**kwargs: Any) -> None:
     if (_env("CARABINER_CAPTURE_SUBAGENT_STOP", "HONCHO_RELATIONSHIP_CAPTURE_SUBAGENT_STOP") or "false").lower() not in {"1", "true", "yes", "on"}:
         return
     cfg = load_carabiner_config()
-    if not cfg.enabled or not _capture_enabled():
+    if not cfg.enabled or not _delegate_capture_enabled():
         return
     summary = (kwargs.get("child_summary") or "").strip()
     child_role = kwargs.get("child_role") or "subagent"
